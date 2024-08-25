@@ -601,7 +601,11 @@ function render() {
 
     // Update flock distribution every 250ms (4Hz)
     if (now - lastDistributionUpdateTime > DISTRIBUTION_UPDATE_INTERVAL) {
-      updateFlockDistribution();
+      try {
+        updateFlockDistribution();
+      } catch (error) {
+        console.error("Error updating flock distribution:", error);
+      }
       lastDistributionUpdateTime = now;
     }
   }
@@ -647,7 +651,23 @@ function getBoidData(index) {
 
 function updateFlockDistribution() {
   const cameraDirection = new THREE.Vector3();
-  camera.getWorldDirection(cameraDirection);
+  const cameraPosition = new THREE.Vector3();
+  const cameraQuaternion = new THREE.Quaternion();
+
+  // Check if we're in VR mode
+  if (renderer.xr.isPresenting) {
+    // Get the VR camera's world position and orientation
+    renderer.xr.getCamera(camera).getWorldPosition(cameraPosition);
+    renderer.xr.getCamera(camera).getWorldQuaternion(cameraQuaternion);
+
+    // Calculate the forward direction of the VR camera
+    cameraDirection.set(0, 0, -1).applyQuaternion(cameraQuaternion);
+  } else {
+    // Use the regular camera for non-VR mode
+    camera.getWorldPosition(cameraPosition);
+    camera.getWorldQuaternion(cameraQuaternion);
+    camera.getWorldDirection(cameraDirection);
+  }
   
   let leftCount = 0;
   let rightCount = 0;
@@ -659,7 +679,7 @@ function updateFlockDistribution() {
       cpuPositions[i*3+2]
     );
     
-    const toBoid = boidPosition.sub(camera.position);
+    const toBoid = new THREE.Vector3().subVectors(boidPosition, cameraPosition);
     const crossProduct = new THREE.Vector3().crossVectors(cameraDirection, toBoid);
     
     if (crossProduct.y > 0) {
