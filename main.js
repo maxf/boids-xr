@@ -8,7 +8,8 @@ import { GPUComputationRenderer } from './js/GPUComputationRenderer.js';
 import { VRButton } from './js/VRButton.js';
 import { XRControllerModelFactory } from './js/XRControllerModelFactory.js';
 
-
+let effectController;
+let sound;
 
 /* TEXTURE WIDTH FOR SIMULATION */
 const WIDTH = 32;
@@ -114,6 +115,14 @@ let controller1, controller2;
 let birdsFollowLeft = false;
 let birdsFollowRight = false;
 
+let cpuPositions = new Float32Array(BIRDS * 3);
+let cpuVelocities = new Float32Array(BIRDS * 3);
+let lastUpdateTime = 0;
+const UPDATE_INTERVAL = 250; // 4Hz = every 250ms
+
+let flockDistributionDisplay;
+let lastDistributionUpdateTime = 0;
+const DISTRIBUTION_UPDATE_INTERVAL = 250; // 4Hz = every 250ms
 
 init();
 
@@ -152,8 +161,10 @@ function createPathStrings(filename) {
 function createMaterialArray(filename) {
   const skyboxImagepaths = createPathStrings(filename);
   const materialArray = skyboxImagepaths.map(image => {
-    let texture = new THREE.TextureLoader().load(image);
-    return new THREE.MeshBasicMaterial({ map: texture, side: THREE.BackSide }); // <---
+    let texture = new THREE.TextureLoader().load(image, undefined, undefined, (err) => {
+      console.error(`Error loading skybox texture ${image}:`, err);
+    });
+    return new THREE.MeshBasicMaterial({ map: texture, side: THREE.BackSide });
   });
   return materialArray;
 }
@@ -187,6 +198,9 @@ function init() {
   const skybox = new THREE.Mesh(skyboxGeometry, materialArray);
   scene.add(skybox);
 
+  console.log("Skybox created");
+  console.log("Scene background color:", scene.background);
+  console.log("Number of objects in scene:", scene.children.length);
 
 /*
   const spotLight = new THREE.SpotLight( 0xffffff );
@@ -197,7 +211,12 @@ function init() {
   scene.add( spotLight );
 */
 
-  scene.add( new THREE.HemisphereLight( 0x808080, 0x606060 ) );
+  const ambientLight = new THREE.AmbientLight(0xffffff, 0.5);
+  scene.add(ambientLight);
+
+  const directionalLight = new THREE.DirectionalLight(0xffffff, 0.5);
+  directionalLight.position.set(0, 1, 0);
+  scene.add(directionalLight);
 
 
 
@@ -282,7 +301,6 @@ function init() {
   window.addEventListener( 'resize', onWindowResize );
 
   let gui;
-  let effectController;
   if (showBoids) {
     gui = new GUI();
 
@@ -290,7 +308,8 @@ function init() {
       separation: 20.0,
       alignment: 20.0,
       cohesion: 20.0,
-      freedom: 0.75
+      freedom: 0.75,
+      flockDistribution: 0.5 // New property for flock distribution
     };
 
     const valuesChanger = function () {
@@ -305,8 +324,20 @@ function init() {
     gui.add( effectController, 'separation', 0.0, 100.0, 1.0 ).onChange( valuesChanger );
     gui.add( effectController, 'alignment', 0.0, 100, 0.001 ).onChange( valuesChanger );
     gui.add( effectController, 'cohesion', 0.0, 100, 0.025 ).onChange( valuesChanger );
+    
+    // Add flock distribution display
+    flockDistributionDisplay = gui.add(effectController, 'flockDistribution', 0, 1).listen();
+    if (flockDistributionDisplay) {
+      flockDistributionDisplay.domElement.style.pointerEvents = 'none';
+      const distributionLabel = flockDistributionDisplay.domElement.parentElement.querySelector('.property-name');
+      if (distributionLabel) {
+        distributionLabel.textContent = 'Flock Distribution';
+      }
+    }
+    
     gui.close();
 
+    console.log("GUI initialized");
 
     const button = document.getElementById('VRButton');
     button.addEventListener('click', function() {
@@ -316,18 +347,13 @@ function init() {
   }
 }
 
-let sound;
 function startAudio() {
-  // create the PositionalAudio object (passing in the listener)
-
   if (!sound) {
     const listener = new THREE.AudioListener();
     camera.add( listener );
     sound = new THREE.PositionalAudio( listener );
-    //  birdMesh.add(sound);
     centerOfGravityCursor.add(sound);
 
-    // load a sound and set it as the PositionalAudio object's buffer
     const audioLoader = new THREE.AudioLoader();
 
     audioLoader.load( 'pinknoise.mp3', function( buffer ) {
@@ -335,10 +361,10 @@ function startAudio() {
       sound.loop = true;
       sound.setRefDistance( 100 );
       sound.play();
-
     });
+  } else if (!sound.isPlaying) {
+    sound.play();
   }
-
 }
 
 
@@ -568,9 +594,94 @@ function render() {
     centerOfGravityCursor.position.y = cog.y;
     centerOfGravityCursor.position.z = cog.z;
 
-//    const dist = 1 / (1 + (cog.x*cog.x + cog.y*cog.y + cog.z*cog.z)/50000);
+    if (now - lastUpdateTime > UPDATE_INTERVAL) {
+      updateCPUData();
+      lastUpdateTime = now;
+    }
 
-//    audio.volume = dist;
+    // Update flock distribution every 250ms (4Hz)
+    if (now - lastDistributionUpdateTime > DISTRIBUTION_UPDATE_INTERVAL) {
+      updateFlockDistribution();
+      lastDistributionUpdateTime = now;
+    }
   }
   renderer.render( scene, camera );
+}
+
+function updateCPUData() {
+  const positionData = gpuCompute.getTextureData(positionVariable);
+  const velocityData = gpuCompute.getTextureData(velocityVariable);
+
+  for (let i = 0; i < BIRDS; i++) {
+    cpuPositions[i*3] = positionData[i*4];
+    cpuPositions[i*3+1] = positionData[i*4+1];
+    cpuPositions[i*3+2] = positionData[i*4+2];
+
+    cpuVelocities[i*3] = velocityData[i*4];
+    cpuVelocities[i*3+1] = velocityData[i*4+1];
+    cpuVelocities[i*3+2] = velocityData[i*4+2];
+  }
+
+  // Here you can do something with the CPU data, like sending it to a server or processing it
+  console.log("CPU data updated");
+}
+
+function getBoidData(index) {
+  if (index < 0 || index >= BIRDS) {
+    console.error("Invalid boid index");
+    return null;
+  }
+  return {
+    position: {
+      x: cpuPositions[index*3],
+      y: cpuPositions[index*3+1],
+      z: cpuPositions[index*3+2]
+    },
+    velocity: {
+      x: cpuVelocities[index*3],
+      y: cpuVelocities[index*3+1],
+      z: cpuVelocities[index*3+2]
+    }
+  };
+}
+
+function updateFlockDistribution() {
+  const cameraDirection = new THREE.Vector3();
+  camera.getWorldDirection(cameraDirection);
+  
+  let leftCount = 0;
+  let rightCount = 0;
+  
+  for (let i = 0; i < BIRDS; i++) {
+    const boidPosition = new THREE.Vector3(
+      cpuPositions[i*3],
+      cpuPositions[i*3+1],
+      cpuPositions[i*3+2]
+    );
+    
+    const toBoid = boidPosition.sub(camera.position);
+    const crossProduct = new THREE.Vector3().crossVectors(cameraDirection, toBoid);
+    
+    if (crossProduct.y > 0) {
+      rightCount++;
+    } else {
+      leftCount++;
+    }
+  }
+  
+  const totalCount = leftCount + rightCount;
+  const distribution = rightCount / totalCount;
+  
+  // Update the GUI display
+  if (effectController) {
+    effectController.flockDistribution = distribution;
+  }
+  
+  // Update the visual representation
+  if (flockDistributionDisplay) {
+    const barElement = flockDistributionDisplay.domElement.querySelector('.c');
+    if (barElement) {
+      barElement.style.background = `linear-gradient(to right, #00ff00 ${distribution * 100}%, #ff0000 ${distribution * 100}%)`;
+    }
+  }
 }
