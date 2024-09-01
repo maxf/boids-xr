@@ -284,6 +284,17 @@ var GPUComputationRenderer = function ( sizeX, sizeY, renderer ) {
 
 	};
 
+	this.getTextureData = function (variable) {
+		const currentRenderTarget = this.getCurrentRenderTarget(variable);
+		const width = currentRenderTarget.width;
+		const height = currentRenderTarget.height;
+		const buffer = new Float32Array(width * height * 4);
+		
+		renderer.readRenderTargetPixels(currentRenderTarget, 0, 0, width, height, buffer);
+		
+		return buffer;
+	};
+
 	function addResolutionDefine( materialShader ) {
 
 		materialShader.defines.resolution = 'vec2( ' + sizeX.toFixed( 1 ) + ', ' + sizeY.toFixed( 1 ) + ' )';
